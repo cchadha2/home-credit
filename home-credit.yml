@@ -1,0 +1,17 @@
+name: home-credit
+channels:
+  - defaults
+dependencies:
+  - ipython=6.4.0
+  - jupyter=1.0.0
+  - matplotlib=2.2.2
+  - numpy=1.14.5
+  - pandas=0.23.1
+  - scikit-learn==0.19.1
+  - seaborn=0.8.1
+  - pip:
+    - lightgbm==2.1.2
+    - catboost
+    - xgboost
+prefix: /anaconda3/envs/home-credit
+
