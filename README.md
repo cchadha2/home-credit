@@ -1,4 +1,4 @@
-Home-Credit-Risk-Group Kaggle competition repo - 0.797 AUC (top 23%)
+Home-Credit-Risk-Group Kaggle competition repo - 0.801 AUC (top 9%)
 
 - Download all Kaggle [competition data](https://www.kaggle.com/c/home-credit-default-risk/data) and place in /data folder
 
