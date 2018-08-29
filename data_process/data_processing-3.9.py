@@ -3,7 +3,14 @@ import time
 from contextlib import contextmanager
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold
+from tqdm import tqdm_notebook as tqdm
+from scipy.stats import skew, kurtosis, iqr
+from functools import partial
+from sklearn.externals import joblib
+from sklearn.linear_model import LinearRegression
+from utils import parallel_apply
+# from src.feature_extraction import add_features, add_features_in_group
+
 
 @contextmanager
 def timer(title):
@@ -31,6 +38,8 @@ def application_train_and_test():
     df['DAYS_EMPLOYED'].replace({365243: np.nan}, inplace = True)
     df['CODE_GENDER'].replace({'XNA': np.nan}, inplace = True)
     df['ORGANIZATION_TYPE'].replace({'XNA': np.nan}, inplace = True)
+    df['NAME_FAMILY_STATUS'].replace('Unknown', np.nan, inplace=True)
+    df['ORGANIZATION_TYPE'].replace('XNA', np.nan, inplace=True)
     df['DAYS_LAST_PHONE_CHANGE'].replace(0, np.nan, inplace=True)
     
     useless_features = ['FLAG_DOCUMENT_10', 'FLAG_DOCUMENT_12', 'FLAG_DOCUMENT_13', 'FLAG_DOCUMENT_14', 
@@ -83,6 +92,19 @@ def application_train_and_test():
     df['GOODS_PER_FAMILY_MEMBER'] = df['AMT_GOODS_PRICE']/df['CNT_FAM_MEMBERS']
     df['FAM_SIZE_PER_POPULATION'] = df['CNT_FAM_MEMBERS']/df['REGION_POPULATION_RELATIVE']
 
+    df['CHILDREN_PER_FAMILY'] = df['CNT_CHILDREN']/df['CNT_FAM_MEMBERS']
+    df['FAMILY_CHILD_DIFF'] = df['CNT_FAM_MEMBERS']-df['CNT_CHILDREN']
+    df['CHILD_TO_NON_CHILD_RATIO'] = df['CNT_CHILDREN'] / df['FAMILY_CHILD_DIFF']
+    df['INCOME_PER_NON_CHILD'] = df['AMT_INCOME_TOTAL'] / df['FAMILY_CHILD_DIFF']
+    df['CREDIT_PER_CHILD'] = df['AMT_CREDIT'] / (1 + df['CNT_CHILDREN'])
+    df['CREDIT_PER_NON_CHILD'] = df['AMT_CREDIT'] / df['FAMILY_CHILD_DIFF']
+
+    df['CREDIT_TO_ANNUITY_RATIO'] = df['AMT_CREDIT'] / df['AMT_ANNUITY']
+    df['CREDIT_TO_AMT_GOODS_RATIO'] = df['AMT_CREDIT'] / df['AMT_GOODS_PRICE']
+    df['CREDIT_TO_AMT_INCOME_RATIO'] = df['AMT_CREDIT'] / df['AMT_INCOME_TOTAL']
+    df['INCOME_PER_CHILD'] = df['AMT_INCOME_TOTAL']/(1+df['CNT_CHILDREN'])
+
+
     df['30_CNT_SOCIAL_CIRCLE_RATIO'] = df['DEF_30_CNT_SOCIAL_CIRCLE']/df['OBS_30_CNT_SOCIAL_CIRCLE']
     df['60_CNT_SOCIAL_CIRCLE_RATIO'] = df['DEF_60_CNT_SOCIAL_CIRCLE']/df['OBS_60_CNT_SOCIAL_CIRCLE']
     df['DEF_CNT_SOCIAL_CIRCLE_TOTAL'] = df['DEF_30_CNT_SOCIAL_CIRCLE'] + df['DEF_60_CNT_SOCIAL_CIRCLE']
@@ -104,6 +126,83 @@ def application_train_and_test():
     df['AMT_CREDIT_AMT_ANNUITY'] = df['AMT_CREDIT'] * df['AMT_ANNUITY']
     df['AMT_CREDIT_AMT_CREDIT'] = df['AMT_CREDIT']**2
     df['AMT_ANNUITY_AMT_ANNUITY'] = df['AMT_ANNUITY']**2    
+
+    AGGREGATION_RECIPIES  = [
+    (['CODE_GENDER', 'NAME_EDUCATION_TYPE'], [('AMT_ANNUITY', 'max'),
+                                              ('AMT_CREDIT', 'max'),
+                                              ('EXT_SOURCE_1', 'mean'),
+                                              ('EXT_SOURCE_2', 'mean'),
+                                              ('OWN_CAR_AGE', 'max'),
+                                              ('OWN_CAR_AGE', 'sum')]),
+    (['CODE_GENDER', 'ORGANIZATION_TYPE'], [('AMT_ANNUITY', 'mean'),
+                                            ('AMT_INCOME_TOTAL', 'mean'),
+                                            ('DAYS_REGISTRATION', 'mean'),
+                                            ('EXT_SOURCE_1', 'mean')]),
+    (['CODE_GENDER', 'REG_CITY_NOT_WORK_CITY'], [('AMT_ANNUITY', 'mean'),
+                                                 ('CNT_CHILDREN', 'mean'),
+                                                 ('DAYS_ID_PUBLISH', 'mean')]),
+    (['CODE_GENDER', 'NAME_EDUCATION_TYPE', 'OCCUPATION_TYPE', 'REG_CITY_NOT_WORK_CITY'], [('EXT_SOURCE_1', 'mean'),
+                                                                                           ('EXT_SOURCE_2', 'mean')]),
+    (['NAME_EDUCATION_TYPE', 'OCCUPATION_TYPE'], [('AMT_CREDIT', 'mean'),
+                                                  ('AMT_REQ_CREDIT_BUREAU_YEAR', 'mean'),
+                                                  ('APARTMENTS_AVG', 'mean'),
+                                                  ('BASEMENTAREA_AVG', 'mean'),
+                                                  ('EXT_SOURCE_1', 'mean'),
+                                                  ('EXT_SOURCE_2', 'mean'),
+                                                  ('EXT_SOURCE_3', 'mean'),
+                                                  ('NONLIVINGAREA_AVG', 'mean'),
+                                                  ('OWN_CAR_AGE', 'mean'),
+                                                  ('YEARS_BUILD_AVG', 'mean')]),
+    (['NAME_EDUCATION_TYPE', 'OCCUPATION_TYPE', 'REG_CITY_NOT_WORK_CITY'], [('ELEVATORS_AVG', 'mean'),
+                                                                            ('EXT_SOURCE_1', 'mean')]),
+    (['OCCUPATION_TYPE'], [('AMT_ANNUITY', 'mean'),
+                           ('CNT_CHILDREN', 'mean'),
+                           ('CNT_FAM_MEMBERS', 'mean'),
+                           ('DAYS_BIRTH', 'mean'),
+                           ('DAYS_EMPLOYED', 'mean'),
+                           ('DAYS_ID_PUBLISH', 'mean'),
+                           ('DAYS_REGISTRATION', 'mean'),
+                           ('EXT_SOURCE_1', 'mean'),
+                           ('EXT_SOURCE_2', 'mean'),
+                           ('EXT_SOURCE_3', 'mean')]),
+    ]
+
+    groupby_aggregate_names = []
+    for groupby_cols, specs in tqdm(AGGREGATION_RECIPIES):
+        group_object = df.groupby(groupby_cols)
+        for select, agg in tqdm(specs):
+            groupby_aggregate_name = '{}_{}_{}'.format('_'.join(groupby_cols), agg, select)
+            df = df.merge(group_object[select]
+                                  .agg(agg)
+                                  .reset_index()
+                                  .rename(index=str,
+                                          columns={select: groupby_aggregate_name})
+                                  [groupby_cols + [groupby_aggregate_name]],
+                                  on=groupby_cols,
+                                  how='left')
+            groupby_aggregate_names.append(groupby_aggregate_name)
+
+    diff_feature_names = []
+    for groupby_cols, specs in tqdm(AGGREGATION_RECIPIES):
+        for select, agg in tqdm(specs):
+            if agg in ['mean','median','max','min']:
+                groupby_aggregate_name = '{}_{}_{}'.format('_'.join(groupby_cols), agg, select)
+                diff_name = '{}_diff'.format(groupby_aggregate_name)
+                abs_diff_name = '{}_abs_diff'.format(groupby_aggregate_name)
+
+                df[diff_name] = df[select] - df[groupby_aggregate_name] 
+                df[abs_diff_name] = np.abs(df[select] -df[groupby_aggregate_name]) 
+                
+                diff_feature_names.append(diff_name)
+                diff_feature_names.append(abs_diff_name)
+
+    df['EXT_SOURCE_WEIGHTED'] = df.EXT_SOURCE_1 * 2 + df.EXT_SOURCE_2 * 3 + df.EXT_SOURCE_3 * 4
+    for function_name in ['min', 'max', 'sum', 'mean', 'nanmedian']:
+        df['EXT_SOURCES{}'.format(function_name)] = eval('np.{}'.format(function_name))(
+            df[['EXT_SOURCE_1', 'EXT_SOURCE_2', 'EXT_SOURCE_3']], axis=1)
+
+    df['LONG_EMPLOYMENT'] = (df['DAYS_EMPLOYED'] > -2000).astype(int)
+    df['RETIREMENT_AGE'] = (df['DAYS_BIRTH'] > -14000).astype(int)
 
     categorical_features = ['FLAG_OWN_CAR', 'FLAG_OWN_REALTY', 'FLAG_MOBIL', 'FLAG_EMP_PHONE',
                             'FLAG_WORK_PHONE', 'FLAG_CONT_MOBILE', 'FLAG_PHONE', 'FLAG_EMAIL',
@@ -133,10 +232,13 @@ def bureau_and_balance(df):
     bureau = pd.read_csv('../data/bureau.csv')
     bureau_balance = pd.read_csv('../data/bureau_balance.csv')
 
+    bureau['AMT_CREDIT_SUM'].fillna(0, inplace=True)
+    bureau['AMT_CREDIT_SUM_DEBT'].fillna(0, inplace=True)
+    bureau['AMT_CREDIT_SUM_OVERDUE'].fillna(0, inplace=True)
+    bureau['CNT_CREDIT_PROLONG'].fillna(0, inplace=True)
     bureau['DAYS_CREDIT_ENDDATE'][bureau['DAYS_CREDIT_ENDDATE'] < -40000] = np.nan
     bureau['DAYS_CREDIT_UPDATE'][bureau['DAYS_CREDIT_UPDATE'] < -40000] = np.nan
     bureau['DAYS_ENDDATE_FACT'][bureau['DAYS_ENDDATE_FACT'] < -40000] = np.nan
-
 
     active_loans = bureau[bureau['CREDIT_ACTIVE'] == 'Active']
     active_loans = active_loans.groupby('SK_ID_CURR', as_index=False)['CREDIT_ACTIVE'].count().rename(columns = {'CREDIT_ACTIVE': 'active_loans'})
@@ -166,17 +268,16 @@ def bureau_and_balance(df):
                            }
 
     bureau_balance_aggregations = {'MONTHS_BALANCE': ['min', 'max', 'size']}
-
-    # for col in bureau_cat_cols:
-    #     bureau_aggregations[col] = ['mean']
-    # for col in bureau_balance_cat_cols:
-    #     bureau_balance_aggregations[col] = ['mean']
-
-
+    
+    for col in bureau_cat_cols:
+        bureau_aggregations[col] = ['mean']
+    for col in bureau_balance_cat_cols:
+        bureau_balance_aggregations[col] = ['mean']
+        
     bureau_balance_aggregations = bureau_balance.groupby('SK_ID_BUREAU').agg(bureau_balance_aggregations)
     bureau_balance_aggregations.columns = pd.Index([e[0] + "_" + e[1].upper() for e in bureau_balance_aggregations.columns.tolist()])
     bureau = bureau.join(bureau_balance_aggregations, how='left', on='SK_ID_BUREAU')
-    # bureau.drop(['SK_ID_BUREAU'], axis=1, inplace= True)
+    bureau.drop(['SK_ID_BUREAU'], axis=1, inplace= True)
         
     bureau_agg = bureau.groupby('SK_ID_CURR').agg(bureau_aggregations)
     bureau_agg.columns = pd.Index(['BURO_' + e[0] + "_" + e[1].upper() for e in bureau_agg.columns.tolist()])
@@ -197,27 +298,6 @@ def bureau_and_balance(df):
         bureau_agg['NEW_RATIO_BURO_' + e[0] + "_" + e[1].upper()] = bureau_agg['ACTIVE_' + e[0] + "_" + e[1].upper()] / bureau_agg['CLOSED_' + e[0] + "_" + e[1].upper()]
     
     df = df.merge(bureau_agg, on = 'SK_ID_CURR', how = 'left')
-
-    # Oof cat mean aggregation
-
-    bureau_cat_cols.append('SK_ID_CURR')
-    bureau_balance_cat_cols.append('SK_ID_BUREAU')
-
-    folds = KFold(n_splits= 5, shuffle=True, random_state=1001)
-    for n_fold, (train_idx, valid_idx) in enumerate(folds.split(bureau_balance)):
-        bureau_balance_cat_aggregations = bureau_balance.loc[train_idx, bureau_balance_cat_cols].groupby('SK_ID_BUREAU').agg(['mean', 'count'])
-        bureau_balance_cat_aggregations.columns = pd.Index([e[0] + "_" + e[1].upper() + str(n_fold) for e in bureau_balance_cat_aggregations.columns.tolist()])
-        bureau = bureau.join(bureau_balance_cat_aggregations, how='left', on='SK_ID_BUREAU')
-        bb_cat_agg_list = list(bureau_balance_cat_aggregations.columns)
-        bureau_cat_cols += bb_cat_agg_list
-        
-    folds = KFold(n_splits= 5, shuffle=True, random_state=1001)
-    for n_fold, (train_idx, valid_idx) in enumerate(folds.split(bureau)):    
-        bureau_cat_aggregations = bureau.loc[train_idx, bureau_cat_cols].groupby('SK_ID_CURR').agg(['mean', 'count'])
-        bureau_cat_aggregations.columns = pd.Index(['BURO_' + e[0] + "_" + e[1].upper() + str(n_fold) for e in bureau_cat_aggregations.columns.tolist()])
-        df = df.merge(bureau_cat_aggregations, on = 'SK_ID_CURR', how = 'left')
-
-    bureau.drop(['SK_ID_BUREAU'], axis=1, inplace= True)
             
     del bureau
     del bureau_balance
@@ -236,10 +316,10 @@ def cc_balance(df):
 
     credit_card_balance['AMT_DRAWINGS_ATM_CURRENT'][credit_card_balance['AMT_DRAWINGS_ATM_CURRENT'] < 0] = np.nan
     credit_card_balance['AMT_DRAWINGS_CURRENT'][credit_card_balance['AMT_DRAWINGS_CURRENT'] < 0] = np.nan
+
     
     credit_card_balance['AMT_LIMIT_TO_PAYMENT_RATIO'] = credit_card_balance['AMT_PAYMENT_CURRENT']/credit_card_balance['AMT_CREDIT_LIMIT_ACTUAL']
     
-        
     cc_agg = credit_card_balance.groupby('SK_ID_CURR').agg(['min', 'max', 'mean', 'sum', 'var'])
     cc_agg.columns = pd.Index(['CC_' + e[0] + "_" + e[1].upper() for e in cc_agg.columns.tolist()])
     cc_agg['CC_COUNT'] = credit_card_balance.groupby('SK_ID_CURR').size()
@@ -279,21 +359,23 @@ def installments(df):
 
     ins.loc[:,'EARLY_INSTALMENT_PAST_DUE'][(ins['NUM_INSTALMENT_NUMBER'] <= 3) & (ins['DUE_DATE_DIFF'] <= 0)]  = 1
     ins.loc[:,'EARLY_INSTALMENT_BEFORE_DUE'][(ins['NUM_INSTALMENT_NUMBER'] <= 3) & (ins['DUE_DATE_DIFF'] > 0)]  = 1
-    
-    # CREATE FEATURE FOR PREVIOUS INSTALLMENT PAYMENT BEING LATE
 
+    ins['PAST_DUE'] = (ins['DUE_DATE_DIFF'] < 0).astype(int)
+    ins['PAID_OVER_AMOUNT'] = ins['AMT_PAYMENT'] - ins['AMT_INSTALMENT']
+    ins['PAID_OVER'] = (ins['PAID_OVER_AMOUNT'] > 0).astype(int)
+    
     # Feature interactions
     ins['INSTALLMENTS_DIFF_DUE_DATE_DIFF'] = ins['INSTALLMENTS_DIFF'] * ins['DUE_DATE_DIFF']
     ins['INSTALLMENTS_DIFF_INSTALLMENTS_DIFF'] = ins['INSTALLMENTS_DIFF']**2
     ins['DUE_DATE_DIFF_DUE_DATE_DIFF'] = ins['DUE_DATE_DIFF']**2
     
     aggregations = {
-        'NUM_INSTALMENT_VERSION': ['nunique'],
+        # 'NUM_INSTALMENT_VERSION': ['nunique'],
         'PAYMENT_PERC': ['max', 'mean', 'sum', 'var'],
         'AMT_INSTALMENT': ['min', 'max', 'mean', 'sum'],
         'AMT_PAYMENT': ['min', 'max', 'mean', 'sum'],
         'DAYS_ENTRY_PAYMENT': ['max', 'mean', 'sum'], 
-        'DUE_DATE_DIFF': ['max', 'mean', 'sum', 'var'], 
+        # 'DUE_DATE_DIFF': ['max', 'mean', 'sum', 'var'], 
         'DBD_30': ['mean', 'count'],
         'DBD_60': ['mean'],
         'DBD_90': ['mean'],
@@ -311,11 +393,149 @@ def installments(df):
     ins_agg = ins.groupby('SK_ID_CURR').agg(aggregations)
     ins_agg.columns = pd.Index(['INSTAL_' + e[0] + "_" + e[1].upper() for e in ins_agg.columns.tolist()])
     ins_agg['INSTAL_COUNT'] = ins.groupby('SK_ID_CURR').size()
-    
+
     df = df.merge(ins_agg, on = 'SK_ID_CURR', how = 'left')
+
+    def add_features(feature_name, aggs, features, feature_names, groupby):
+        feature_names.extend(['{}_{}'.format(feature_name, agg) for agg in aggs])
+
+        for agg in aggs:
+            if agg == 'kurt':
+                agg_func = kurtosis
+            elif agg == 'iqr':
+                agg_func = iqr
+            else:
+                agg_func = agg
+            
+            g = groupby[feature_name].agg(agg_func).reset_index().rename(index=str,
+                                                                    columns={feature_name: '{}_{}'.format(feature_name,
+                                                                                                        agg)})
+            features = features.merge(g, on='SK_ID_CURR', how='left')
+        return features, feature_names
+
+
+    def add_features_in_group(features, gr_, feature_name, aggs, prefix):
+        for agg in aggs:
+            if agg == 'sum':
+                features['{}{}_sum'.format(prefix, feature_name)] = gr_[feature_name].sum()
+            elif agg == 'mean':
+                features['{}{}_mean'.format(prefix, feature_name)] = gr_[feature_name].mean()
+            elif agg == 'max':
+                features['{}{}_max'.format(prefix, feature_name)] = gr_[feature_name].max()
+            elif agg == 'min':
+                features['{}{}_min'.format(prefix, feature_name)] = gr_[feature_name].min()
+            elif agg == 'std':
+                features['{}{}_std'.format(prefix, feature_name)] = gr_[feature_name].std()
+            elif agg == 'count':
+                features['{}{}_count'.format(prefix, feature_name)] = gr_[feature_name].count()
+            elif agg == 'skew':
+                features['{}{}_skew'.format(prefix, feature_name)] = skew(gr_[feature_name])
+            elif agg == 'kurt':
+                features['{}{}_kurt'.format(prefix, feature_name)] = kurtosis(gr_[feature_name])
+            elif agg == 'iqr':
+                features['{}{}_iqr'.format(prefix, feature_name)] = iqr(gr_[feature_name])
+            elif agg == 'median':
+                features['{}{}_median'.format(prefix, feature_name)] = gr_[feature_name].median()
+            return features
+            
+    features = pd.DataFrame({'SK_ID_CURR':ins['SK_ID_CURR'].unique()})
+    groupby = ins.groupby(['SK_ID_CURR'])
+
+    feature_names = []
+
+    features, feature_names = add_features('NUM_INSTALMENT_VERSION', 
+                                        ['sum','mean','max','min','std', 'nunique', 'median','skew', 'kurt','iqr'],
+                                        features, feature_names, groupby)
+
+    features, feature_names = add_features('DUE_DATE_DIFF', 
+                                        ['sum','mean','max','min', 'var', 'std', 'median','skew', 'kurt','iqr'],
+                                        features, feature_names, groupby)
+
+    features, feature_names = add_features('PAST_DUE', ['sum','mean'],
+                                        features, feature_names, groupby)
+
+    features, feature_names = add_features('PAID_OVER_AMOUNT', 
+                                        ['sum','mean','max','min','std', 'median','skew', 'kurt','iqr'],
+                                        features, feature_names, groupby)
+
+    features, feature_names = add_features('PAID_OVER', ['sum','mean'],
+                                        features, feature_names, groupby)
+
+    # def last_k_instalment_features(gr, periods):
+    #     gr_ = gr.copy()
+    #     gr_.sort_values(['DAYS_INSTALMENT'],ascending=False, inplace=True)
+        
+    #     features = {}
+
+    #     for period in periods:
+    #         gr_period = gr_.iloc[:period]
+
+    #         features = add_features_in_group(features,gr_period, 'NUM_INSTALMENT_VERSION', 
+    #                                     ['sum','mean','max','min','std', 'median','skew', 'kurt','iqr'],
+    #                                         'last_{}_'.format(period))
+            
+    #         features = add_features_in_group(features,gr_period, 'DUE_DATE_DIFF', 
+    #                                     ['sum','mean','max','min','std', 'median','skew', 'kurt','iqr'],
+    #                                         'last_{}_'.format(period))
+    #         features = add_features_in_group(features,gr_period ,'PAST_DUE', 
+    #                                     ['count','mean'],
+    #                                         'last_{}_'.format(period))
+    #         features = add_features_in_group(features,gr_period ,'PAID_OVER_AMOUNT', 
+    #                                     ['sum','mean','max','min','std', 'median','skew', 'kurt','iqr'],
+    #                                         'last_{}_'.format(period))
+    #         features = add_features_in_group(features,gr_period,'PAID_OVER', 
+    #                                     ['count','mean'],
+    #                                         'last_{}_'.format(period))
+        
+    #     return features
+    
+    # func = partial(last_k_instalment_features, periods=[1,5,10,20,50,100])
+
+    # g = parallel_apply(groupby, func, index_name='SK_ID_CURR',
+    #                 num_workers=16, chunk_size=10000).reset_index()
+    # features = features.merge(g, on='SK_ID_CURR', how='left')
+
+    # def trend_in_last_k_instalment_features(gr, periods):
+    #     gr_ = gr.copy()
+    #     gr_.sort_values(['DAYS_INSTALMENT'],ascending=False, inplace=True)
+        
+    #     features = {}
+
+    #     for period in periods:
+    #         gr_period = gr_.iloc[:period]
+
+
+    #         features = _add_trend_feature(features,gr_period,
+    #                                     'DUE_DATE_DIFF','{}_period_trend_'.format(period)
+    #                                     )
+    #         features = _add_trend_feature(features,gr_period,
+    #                                     'PAID_OVER_AMOUNT','{}_period_trend_'.format(period)
+    #                                     )
+    #     return features
+
+    # def _add_trend_feature(features,gr,feature_name, prefix):
+    #     y = gr[feature_name].values
+    #     try:
+    #         x = np.arange(0,len(y)).reshape(-1,1)
+    #         lr = LinearRegression()
+    #         lr.fit(x,y)
+    #         trend = lr.coef_[0]
+    #     except:
+    #         trend=np.nan
+    #     features['{}{}'.format(prefix,feature_name)] = trend
+    #     return features
+
+    # func = partial(trend_in_last_k_instalment_features, periods=[10,50,100,500])
+
+    # g = parallel_apply(groupby, func, index_name='SK_ID_CURR',
+    #                 num_workers=16, chunk_size=10000).reset_index()
+    # features = features.merge(g, on='SK_ID_CURR', how='left')
+
+    df = df.merge(features, on='SK_ID_CURR',how='left')
     
     del ins
     del ins_agg
+    del features
     
     return df
 
@@ -402,15 +622,14 @@ def prev_app(df):
 
     previous_application = pd.read_csv('../data/previous_application.csv')
 
+    previous_application['AMT_APPLICATION'].replace(0, np.nan, inplace= True)
+    previous_application['AMT_CREDIT'].replace(0, np.nan, inplace= True)
+
     previous_application['DAYS_FIRST_DRAWING'].replace(365243, np.nan, inplace= True)
     previous_application['DAYS_FIRST_DUE'].replace(365243, np.nan, inplace= True)
     previous_application['DAYS_LAST_DUE_1ST_VERSION'].replace(365243, np.nan, inplace= True)
     previous_application['DAYS_LAST_DUE'].replace(365243, np.nan, inplace= True)
     previous_application['DAYS_TERMINATION'].replace(365243, np.nan, inplace= True)
-
-    previous_application['AMT_APPLICATION'].replace(0, np.nan, inplace= True)
-    previous_application['AMT_CREDIT'].replace(0, np.nan, inplace= True)
-
     previous_application['DAYS_LENGTH'] = previous_application['DAYS_LAST_DUE'] - previous_application['DAYS_FIRST_DUE']
     previous_application['DAYS_LENGTH_1ST_VERSION'] = previous_application['DAYS_LAST_DUE_1ST_VERSION'] - previous_application['DAYS_FIRST_DUE']
     previous_application['DAYS_LENGTH_TERMINATION'] = previous_application['DAYS_TERMINATION'] - previous_application['DAYS_FIRST_DUE']
@@ -470,12 +689,11 @@ def prev_app(df):
         'RATE_INTEREST_PRIVILEGED': ['min', 'max', 'mean'],
         
     }
-    # cat_aggregations = {}
-    # for cat in cat_cols:
-    #     cat_aggregations[cat] = ['mean']
+    cat_aggregations = {}
+    for cat in cat_cols:
+        cat_aggregations[cat] = ['mean']
 
-    # prev_agg = previous_application.groupby('SK_ID_CURR').agg({**num_aggregations, **cat_aggregations})
-    prev_agg = previous_application.groupby('SK_ID_CURR').agg(num_aggregations)
+    prev_agg = previous_application.groupby('SK_ID_CURR').agg({**num_aggregations, **cat_aggregations})
     prev_agg.columns = pd.Index(['PREV_' + e[0] + "_" + e[1].upper() for e in prev_agg.columns.tolist()])
 
     approved = previous_application[previous_application['NAME_CONTRACT_STATUS_Approved'] == 1]
@@ -494,17 +712,7 @@ def prev_app(df):
     
 
     df = df.merge(prev_agg, on = 'SK_ID_CURR', how = 'left')
-
-    # Oof cat mean aggregation
-    cat_cols.append('SK_ID_CURR')
-
-    folds = KFold(n_splits= 5, shuffle=True, random_state=1001)
-    for n_fold, (train_idx, valid_idx) in enumerate(folds.split(previous_application)):
-        cat_cols_aggregations = previous_application.loc[train_idx, cat_cols].groupby('SK_ID_CURR').agg(['mean', 'count'])
-        cat_cols_aggregations.columns = pd.Index(['PREV_' + e[0] + "_" + e[1].upper() + str(n_fold) for e in cat_cols_aggregations.columns.tolist()])
-
-        df = df.merge(cat_cols_aggregations, on = 'SK_ID_CURR', how = 'left')
-             
+    
     del previous_application
     del prev_agg
     del approved
@@ -707,7 +915,7 @@ def create_features(df):
 def remove_on_importance(df, remove_by_threshold = False, remove_by_rank = False):
     
     # Remove all features that weren't split on above some threshold times in most recent run
-    importance = pd.read_csv('../output/importance_3.8.csv')
+    importance = pd.read_csv('../output/importance_3.9.csv')
 
     if remove_by_threshold == True:
         importance_threshold = 2
@@ -778,48 +986,53 @@ def main(
         importance_prune = False
         ):
     
-    with timer("Process application_train and _test:"):
-        df = application_train_and_test()
-        print("df shape:", df.shape)
-    with timer("Process bureau and bureau_balance"):
-        df = bureau_and_balance(df)
-        print("df shape:", df.shape)
-    with timer("Process credit card balance"):
-        df = cc_balance(df)
-        print("df shape:", df.shape)
-    with timer("Process installments payments"):
-        df = installments(df)
-        print("df shape:", df.shape)
-    with timer("Process POS_CASH_balance"):
-        df = pos_cash(df)
-        print("df shape:", df.shape)
-    with timer("Process previous_applications"):
-        df = prev_app(df)
-        print("df shape:", df.shape)
+    # with timer("Process application_train and _test:"):
+    #     df = application_train_and_test()
+    #     print("df shape:", df.shape)
+    # with timer("Process bureau and bureau_balance"):
+    #     df = bureau_and_balance(df)
+    #     print("df shape:", df.shape)
+    # with timer("Process credit card balance"):
+    #     df = cc_balance(df)
+    #     print("df shape:", df.shape)
+    # with timer("Process installments payments"):
+    #     df = installments(df)
+    #     print("df shape:", df.shape)
+    # with timer("Process POS_CASH_balance"):
+    #     df = pos_cash(df)
+    #     print("df shape:", df.shape)
+    # with timer("Process previous_applications"):
+    #     df = prev_app(df)
+    #     print("df shape:", df.shape)
 
-    if interactions == True: 
-        with timer('Created feature interactions'):
-            df = create_features(df)
-            print("df shape:", df.shape)
+    # if interactions == True:
+    #     with timer('Created feature interactions'):
+    #         df = create_features(df)
+    #         print("df shape:", df.shape)
 
-    feats = [f for f in df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
-    X = df[feats]
-    X = X.replace([np.inf, -np.inf], np.nan)
-    X = X.fillna(X.mean()).clip(-1e11,1e11)
-    X_list = list(X.loc[:, X.isnull().any()].columns)
+    # feats = [f for f in df.columns if f not in ['TARGET','SK_ID_CURR','SK_ID_BUREAU','SK_ID_PREV','index']]
+    # X = df[feats]
+    # X = X.replace([np.inf, -np.inf], np.nan)
+    # X = X.fillna(X.mean()).clip(-1e11,1e11)
+    # X_list = list(X.loc[:, X.isnull().any()].columns)
+
+    # df = df.drop(X_list, axis=1)
+
+    # del X
+
+    df = pd.read_csv('../data/processed_data_3.9.csv', compression = 'zip')
     
     if importance_prune == True:
         with timer("Post-processing"):
             df = remove_on_importance(df, remove_by_threshold = True, remove_by_rank = False)
             print("df shape:", df.shape)
+    
+    # df = reduce_mem_usage(df)
 
-    del X
-
-    df = df.drop(X_list, axis=1)
-    df = reduce_mem_usage(df)
+    df = df.drop('EXT_SOURCESmean',axis=1)
 
     # # Save processed data to csv    
-    df.to_csv('../data/processed_data_3.9.csv', compression = 'zip')  
+    df.to_csv('../data/processed_data_3.9_pruned.csv', compression = 'zip')  
 
 if __name__ == "__main__":
     with timer("Processing pipeline run"):
@@ -827,6 +1040,6 @@ if __name__ == "__main__":
             remove_missing = True,
             remove_dissimilar = True,
             interactions = True,
-            importance_prune = False
+            importance_prune = True
             )
 
