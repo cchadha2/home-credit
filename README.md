@@ -1,4 +1,4 @@
-Home-Credit-Risk-Group Kaggle competition repo
+Home-Credit-Risk-Group Kaggle competition repo (top 10% finish 709th/7198)
 
 - Download all Kaggle [competition data](https://www.kaggle.com/c/home-credit-default-risk/data) and place in /data folder
 
