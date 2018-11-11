@@ -22,7 +22,7 @@ def display_importances(feature_importance_df_):
     sns.barplot(x="importance", y="feature", data=best_features.sort_values(by="importance", ascending=False))
     plt.title('LightGBM Features (avg over folds)')
     plt.tight_layout()
-    plt.savefig('../output/lgbm_importances_3.8.png')
+    plt.savefig('../output/lgbm_importances_3.9_pruned.png')
 
 def kfold_lightgbm(df, num_folds, stratified = False, epochs = 1, corr_save = False, importance_save = False):
     df = df.drop('Unnamed: 0', axis=1)
@@ -109,6 +109,37 @@ def kfold_lightgbm(df, num_folds, stratified = False, epochs = 1, corr_save = Fa
                 verbose_eval=100
             )
 
+            # params = {
+            #     'objective': 'binary',
+            #     'boosting_type': 'gbdt', # 'goss'
+            #     'nthread': 4,
+            #     'learning_rate': 0.1,  # 02,
+            #     'num_leaves': 35,
+            #     'colsample_bytree': 0.2,
+            #     'subsample': 1,
+            #     'subsample_freq': 1,
+            #     'max_depth': -1,
+            #     'reg_alpha': 0.0,
+            #     'reg_lambda': 100.0,
+            #     'min_split_gain': 0.5,
+            #     'min_child_weight': 60, #39.3259775
+            #     'seed': 0,
+            #     'verbose': -1,
+            #     'metric': 'auc',
+            #     'scale_pos_weight': 1,
+            #     'min_child_samples': 50,
+            #     'subsample_for_bin': 300
+            # }
+
+            # clf = train(
+            #     params=params,
+            #     train_set=dtrain,
+            #     num_boost_round=5000,
+            #     valid_sets=[dtrain, dvalid],
+            #     early_stopping_rounds= 100,
+            #     verbose_eval=100
+            # )
+
             oof_preds[valid_idx] = clf.predict(dvalid.data)
             sub_preds += clf.predict(test_df[feats]) / folds.n_splits
 
@@ -135,12 +166,12 @@ def kfold_lightgbm(df, num_folds, stratified = False, epochs = 1, corr_save = Fa
     # Save feature importance df as csv
     if importance_save == True:
         feature_importance_df = feature_importance_df.groupby('feature').agg('mean').drop('fold', axis = 1).sort_values('importance')
-        feature_importance_df.to_csv('../output/importance_3.8.csv')
+        feature_importance_df.to_csv('../output/importance_3.9.csv')
 
 
 def main():
     
-    df = pd.read_csv('../data/processed_data_3.8.csv', compression = 'zip')
+    df = pd.read_csv('../data/processed_data_3.9_pruned.csv', compression = 'zip')
     
     with timer("Run LightGBM with kfold"):
         kfold_lightgbm(
@@ -149,10 +180,10 @@ def main():
             stratified=False,
             epochs=1,
             corr_save=False,
-            importance_save=True) 
+            importance_save=False) 
 
 if __name__ == "__main__":
-    submission_file_name = "../predictions/lightgbm_pred_3.8.csv"
+    submission_file_name = "../predictions/lightgbm_pred_3.9_pruned.csv"
     with timer("Full model run"):
         main()
 
