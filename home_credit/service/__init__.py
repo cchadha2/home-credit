@@ -1,0 +1,1 @@
+from home_credit.service.app import *
