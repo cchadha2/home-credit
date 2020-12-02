@@ -1,0 +1,87 @@
+openapi: '3.0.0'
+info:
+  title: Home-Credit
+  version: '1.0.0'
+servers:
+  - url: /home-credit/
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Check server health
+      operationId: home_credit.service.app.health
+      responses:
+        '200':
+          description: Healthy response 
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '404':
+          description: Not found error
+  /predictions:
+    post:
+      operationId: home_credit.service.app.predict
+      requestBody:
+        description: A JSON object which contains an array of inputs to the model.
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServiceInput'
+      responses:
+        '200':
+          description: JSON object with predictions from model.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServiceOutput'
+        '400':
+          description: Bad request
+        '415':
+          description: Invalid request body content type
+        '500':
+          description: Unexpected internal server error
+components:
+  schemas:
+      ModelInputs:
+        description: Inputs to model for inference
+        type: array
+        minItems: 1
+        example: [[0.08303696739132256, 0.2629485927471776, 0.13937578009978951, 0.16178711341276322]]
+      ServiceInput:
+        description: Input object contains mapping of IDs to the instance to process.
+        type: object
+        required:
+          - input
+        properties:
+          input:
+            $ref: '#/components/schemas/ModelInputs'
+        example: {"input": [[0.08303696739132256, 0.2629485927471776, 0.13937578009978951, 0.16178711341276322]]}
+      Prediction:
+        description: Predicted classes (QUALITY or RISK)
+        type: number
+        example: 0.40912647
+      Predictions:
+        description: Predicted classes (QUALITY or RISK)
+        type: array
+        items:
+          type: number
+          $ref: '#/components/schemas/Prediction'
+        example: [0.40912647, 0.84259245]
+      ServiceOutput:
+        description: The result outputs of the model.
+        type: object
+        properties:
+          output: 
+              $ref: '#/components/schemas/Predictions'
+        example: {"output": [0.40912647, 0.84259245]}
+      Health:
+        description: Healthy response object
+        type: object
+        properties:
+          status:
+            description: Healthy response
+            type: string
+            example: "Application is running"
+        example: {"status": "Application is running"}
