@@ -4,8 +4,8 @@ COPY . /src
 
 WORKDIR /src
 
-RUN pip install -r requirements.txt
-
 RUN pip install .
 
-ENTRYPOINT connexion run home_credit/service/api.yml
+ENV MODEL_PATH="model.pkl"
+
+CMD connexion run home_credit/service/api.yml

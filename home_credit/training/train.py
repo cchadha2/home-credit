@@ -11,6 +11,8 @@ import pandas as pd
 MODEL_PARAMS = {
     "objective": "binary",
     "boosting_type": "gbdt",
+    "num_threads": 8,
+    "num_iterations": 10,
     "learning_rate": 0.02,
     "num_leaves": 20,
     "colsample_bytree": 0.9497036,
